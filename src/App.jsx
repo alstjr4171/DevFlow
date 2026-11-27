@@ -4,7 +4,7 @@ import {
   CheckCircle2, ChevronDown, Circle, Clock3, Code2, Command,
   FolderKanban, Github, LayoutDashboard, ListTodo, Plus, Search,
   Settings, Sparkles, Star, Trash2, X, ExternalLink, GitCommit,
-  RefreshCw, AlertCircle, CalendarDays, MoreHorizontal
+  RefreshCw, AlertCircle, CalendarDays
 } from 'lucide-react'
 import { getInitialSession, hasSupabaseConfig, loadUserData, saveUserData, signInWithGitHub, signOut } from './supabase.js'
 
@@ -29,6 +29,7 @@ export default function App() {
   const [projects, setProjects] = useState([])
   const [username, setUsername] = useState('')
   const [github, setGithub] = useState({ user: null, repos: [], events: [], loading: false, error: '' })
+  const [contributions, setContributions] = useState({ totalContributions: 0, colors: [], weeks: [], loading: false, error: '' })
   const [query, setQuery] = useState('')
 
   useEffect(() => {
@@ -93,7 +94,68 @@ export default function App() {
     }
   }
 
-  useEffect(() => { if (dataReady && username) loadGithub(username) }, [dataReady, username])
+  async function loadContributionCalendar(targetUsername = username) {
+    if (!targetUsername.trim()) return
+    setContributions({ totalContributions: 0, colors: [], weeks: [], loading: true, error: '' })
+    try {
+      const currentSession = await getInitialSession()
+      if (!currentSession?.provider_token) {
+        throw new Error('GitHub 기여 기록을 읽을 토큰이 없습니다. 설정에서 로그아웃한 뒤 GitHub로 다시 로그인해 주세요.')
+      }
+
+      const to = new Date()
+      const from = new Date(to)
+      from.setFullYear(to.getFullYear() - 1)
+      const queryText = `query ContributionCalendar($login: String!, $from: DateTime!, $to: DateTime!) {
+        user(login: $login) {
+          contributionsCollection(from: $from, to: $to) {
+            contributionCalendar {
+              totalContributions
+              colors
+              weeks { contributionDays { contributionCount date color } }
+            }
+          }
+        }
+      }`
+      const response = await fetch('https://api.github.com/graphql', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${currentSession.provider_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query: queryText,
+          variables: { login: targetUsername, from: from.toISOString(), to: to.toISOString() },
+        }),
+      })
+      const result = await response.json()
+      if (!response.ok) {
+        const message = response.status === 401
+          ? 'GitHub 인증이 만료됐습니다. 설정에서 로그아웃한 뒤 다시 로그인해 주세요.'
+          : `GitHub 기여 기록을 불러오지 못했습니다 (${response.status}).`
+        throw new Error(message)
+      }
+      if (result.errors?.length) throw new Error(result.errors[0].message || 'GitHub 기여 기록을 불러오지 못했습니다.')
+      const calendar = result.data?.user?.contributionsCollection?.contributionCalendar
+      if (!calendar) throw new Error('GitHub 사용자의 기여 달력을 찾을 수 없습니다.')
+      setContributions({ ...calendar, loading: false, error: '' })
+    } catch (error) {
+      setContributions(current => ({ ...current, loading: false, error: error.message || 'GitHub 기여 기록을 불러오지 못했습니다.' }))
+    }
+  }
+
+  useEffect(() => {
+    if (dataReady && username) {
+      loadGithub(username)
+      loadContributionCalendar(username)
+    }
+  }, [dataReady, username])
+
+  function refreshGithubData() {
+    loadGithub(username)
+    loadContributionCalendar(username)
+  }
 
   async function handleSignOut() {
     await signOut()
@@ -102,6 +164,7 @@ export default function App() {
     setProjects([])
     setUsername('')
     setGithub({ user: null, repos: [], events: [], loading: false, error: '' })
+    setContributions({ totalContributions: 0, colors: [], weeks: [], loading: false, error: '' })
   }
 
   if (!hasSupabaseConfig) return <LoginScreen configured={false} error={authError} />
@@ -134,7 +197,7 @@ export default function App() {
         ))}
         <div className="sidebar-bottom">
           <div className="tip-card"><Sparkles size={17}/><b>Keep building.</b><p>작은 작업도 꾸준히 쌓이면 큰 결과가 됩니다.</p></div>
-          <div className="profile-row"><div className="profile-avatar">{(session.user.user_metadata?.user_name || username || 'GH').slice(0, 2).toUpperCase()}</div><div><b>{session.user.user_metadata?.full_name || username || 'GitHub 사용자'}</b><small>GitHub 계정</small></div><button className="profile-signout" onClick={handleSignOut} title="로그아웃"><MoreHorizontal size={18}/></button></div>
+          <div className="profile-row"><div className="profile-avatar">{(session.user.user_metadata?.user_name || username || 'GH').slice(0, 2).toUpperCase()}</div><div><b>{session.user.user_metadata?.full_name || username || 'GitHub 사용자'}</b><small>GitHub 계정</small></div></div>
         </div>
       </aside>
 
@@ -145,9 +208,9 @@ export default function App() {
         </header>
         <div className="page-content">
           {syncError && <div className="inline-error"><AlertCircle size={16}/>{syncError}</div>}
-          {page === 'dashboard' && <Dashboard tasks={tasks} todayTasks={todayTasks} stats={stats} projects={projects} github={github} setPage={setPage} toggleTask={toggleTask}/>}
+          {page === 'dashboard' && <Dashboard tasks={tasks} todayTasks={todayTasks} stats={stats} projects={projects} github={github} contributions={contributions} setPage={setPage} toggleTask={toggleTask}/>}
           {page === 'todo' && <TodoPage tasks={filteredTasks} allTasks={tasks} query={query} setQuery={setQuery} addTask={addTask} toggleTask={toggleTask} deleteTask={deleteTask}/>}
-          {page === 'github' && <GithubPage github={github} username={username} setUsername={setUsername} loadGithub={loadGithub}/>}
+          {page === 'github' && <GithubPage github={github} contributions={contributions} username={username} setUsername={setUsername} onRefresh={refreshGithubData}/>}
           {page === 'projects' && <ProjectsPage projects={projects} addProject={addProject} deleteProject={deleteProject}/>}
           {page === 'settings' && <SettingsPage username={username} setUsername={setUsername} loadGithub={loadGithub} session={session} onSignOut={handleSignOut}/>}
         </div>
@@ -159,7 +222,7 @@ export default function App() {
 function PageHeading({ eyebrow, title, description, action }) {
   return <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>{action}</div>
 }
-function Dashboard({ tasks, todayTasks, stats, projects, github, setPage, toggleTask }) {
+function Dashboard({ tasks, todayTasks, stats, projects, github, contributions, setPage, toggleTask }) {
   const percent = stats.total ? Math.round(stats.completed / stats.total * 100) : 0
   return <>
     <PageHeading eyebrow="OVERVIEW" title="좋은 하루야, 개발자님 👋" description="오늘의 작업과 개발 진행 상황을 확인해 보세요." action={<button className="primary-btn" onClick={() => setPage('todo')}><Plus size={17}/> 할 일 추가</button>}/>
@@ -183,6 +246,10 @@ function Dashboard({ tasks, todayTasks, stats, projects, github, setPage, toggle
       <section className="panel projects-panel">
         <div className="panel-heading"><div><h2>내 프로젝트</h2><p>최근 관리 중인 프로젝트</p></div><button className="text-btn" onClick={() => setPage('projects')}>전체 보기 <ArrowUpRight size={15}/></button></div>
         <div className="project-mini-list">{projects.slice(0, 3).map(p => <div className="project-mini" key={p.id}><div className="project-icon" style={{ background: `${p.color}20`, color: p.color }}><Code2 size={18}/></div><div className="project-mini-info"><b>{p.name}</b><small>{p.description}</small><div className="mini-track"><span style={{ width: `${p.progress}%`, background: p.color }}/></div></div><strong>{p.progress}%</strong></div>)}</div>
+      </section>
+      <section className="panel contribution-panel">
+        <div className="panel-heading"><div><h2>GitHub 일일 기여 기록</h2><p>최근 1년 · 커밋, 이슈, PR 등</p></div><strong className="contribution-total">{contributions.totalContributions} <span>contributions</span></strong></div>
+        <ContributionCalendar calendar={contributions}/>
       </section>
       <section className="panel github-panel">
         <div className="panel-heading"><div><h2>GitHub 활동</h2><p>최근 공개 활동</p></div><button className="text-btn" onClick={() => setPage('github')}>GitHub 보기 <ArrowUpRight size={15}/></button></div>
@@ -209,9 +276,9 @@ function TodoPage({ tasks, allTasks, query, setQuery, addTask, toggleTask, delet
     <section className="panel todo-panel"><div className="todo-toolbar"><div className="filter-tabs">{['전체', '미완료', '완료'].map(f => <button key={f} className={filter === f ? 'selected' : ''} onClick={() => setFilter(f)}>{f} {f === '전체' ? allTasks.length : f === '완료' ? allTasks.filter(t => t.done).length : allTasks.filter(t => !t.done).length}</button>)}</div><div className="search-box"><Search size={16}/><input placeholder="작업 검색..." value={query} onChange={e => setQuery(e.target.value)}/></div></div><div className="task-list">{visible.length ? visible.map(t => <TaskRow key={t.id} task={t} toggleTask={toggleTask} onDelete={deleteTask}/>) : <Empty text="표시할 작업이 없습니다."/>}</div></section>
   </>
 }
-function GithubPage({ github, username, setUsername, loadGithub }) {
+function GithubPage({ github, contributions, username, setUsername, onRefresh }) {
   return <>
-    <PageHeading eyebrow="DEVELOPER ACTIVITY" title="GitHub 활동" description="GitHub 프로필과 공개 Repository, 최근 활동을 확인합니다." action={<button className="secondary-btn" onClick={loadGithub}><RefreshCw size={16}/> 새로고침</button>}/>
+    <PageHeading eyebrow="DEVELOPER ACTIVITY" title="GitHub 활동" description="GitHub 프로필과 일일 기여도, 공개 Repository, 최근 활동을 확인합니다." action={<button className="secondary-btn" onClick={onRefresh}><RefreshCw size={16}/> 새로고침</button>}/>
     <section className="panel github-profile">
       <div className="github-avatar">{github.user?.avatar_url ? <img src={github.user.avatar_url} alt="GitHub avatar"/> : <Github size={34}/>}</div>
       <div className="github-user-info"><h2>{github.user?.name || username}</h2><a href={`https://github.com/${username}`} target="_blank" rel="noreferrer">@{username} <ExternalLink size={13}/></a><p>{github.user?.bio || 'GitHub 프로필 소개가 없습니다.'}</p></div>
@@ -219,11 +286,45 @@ function GithubPage({ github, username, setUsername, loadGithub }) {
     </section>
     {github.error && <div className="inline-error"><AlertCircle size={16}/>{github.error}</div>}
     {github.loading && <div className="panel"><Empty text="GitHub 데이터를 불러오는 중입니다..."/></div>}
+    <section className="panel contribution-panel github-contribution-panel"><div className="panel-heading"><div><h2>일일 기여 기록</h2><p>최근 1년 · 커밋, 이슈, PR 등</p></div><strong className="contribution-total">{contributions.totalContributions} <span>contributions</span></strong></div><ContributionCalendar calendar={contributions}/></section>
     <div className="two-column">
       <section className="panel"><div className="panel-heading"><div><h2>최근 Repository</h2><p>최근 업데이트된 공개 저장소</p></div><Github size={18}/></div>{github.repos.length ? github.repos.map(repo => <div className="repo-row" key={repo.id}><div><b><a href={repo.html_url} target="_blank" rel="noreferrer">{repo.name} <ExternalLink size={12}/></a></b><p>{repo.description || '설명이 등록되지 않았습니다.'}</p><div className="repo-meta"><span><i className="language-dot"/> {repo.language || '언어 미지정'}</span><span><Star size={13}/> {repo.stargazers_count}</span><span><GitCommit size={13}/> {new Date(repo.updated_at).toLocaleDateString('ko-KR')}</span></div></div></div>) : !github.loading && <Empty text="Repository 데이터가 없습니다."/>}</section>
       <section className="panel"><div className="panel-heading"><div><h2>최근 활동</h2><p>GitHub 공개 이벤트</p></div><Activity size={18}/></div>{github.events.length ? github.events.map(ev => <EventRow key={ev.id} event={ev}/>) : !github.loading && <Empty text="최근 공개 활동이 없습니다."/>}</section>
     </div>
   </>
+}
+function ContributionCalendar({ calendar }) {
+  if (calendar.loading && !calendar.weeks.length) return <Empty text="GitHub 기여 기록을 불러오는 중입니다..."/>
+  if (calendar.error && !calendar.weeks.length) return <div className="contribution-error">{calendar.error}</div>
+  if (!calendar.weeks.length) return <Empty text="표시할 GitHub 기여 기록이 없습니다."/>
+
+  const months = calendar.weeks.map((week, index) => {
+    const firstOfMonth = week.contributionDays.find(day => day.date.slice(-2) === '01')
+    const date = firstOfMonth?.date || (index === 0 ? week.contributionDays[0]?.date : null)
+    return date ? new Date(`${date}T00:00:00Z`).toLocaleDateString('ko-KR', { month: 'short', timeZone: 'UTC' }) : ''
+  })
+  return <div className="contribution-calendar">
+    {calendar.error && <div className="contribution-error compact-error">{calendar.error}</div>}
+    <div className="contribution-scroll">
+      <div className="contribution-months"><div className="contribution-label-spacer"/>{months.map((month, index) => <span className="contribution-month" key={`${month}-${index}`}>{month}</span>)}</div>
+      <div className="contribution-chart-row">
+        <div className="contribution-weekdays"><span>월</span><span/><span>수</span><span/><span>금</span><span/><span/></div>
+        <div className="contribution-weeks">{calendar.weeks.map((week, weekIndex) => {
+          const daysByWeekday = Array(7).fill(null)
+          week.contributionDays.forEach(day => {
+            const weekday = new Date(`${day.date}T00:00:00Z`).getUTCDay()
+            daysByWeekday[(weekday + 6) % 7] = day
+          })
+          return <div className="contribution-week" key={`${weekIndex}-${week.contributionDays[0]?.date || 'week'}`}>
+            {daysByWeekday.map((day, dayIndex) => day
+              ? <span className="contribution-day" key={day.date} title={`${day.date}: ${day.contributionCount} contributions`} style={{ backgroundColor: day.color || undefined }} aria-label={`${day.date}: ${day.contributionCount} contributions`}/>
+              : <span className="contribution-day empty-day" key={`empty-${dayIndex}`} aria-hidden="true"/>)}
+          </div>
+        })}</div>
+      </div>
+    </div>
+    <div className="contribution-legend"><span>Less</span><div className="legend-swatches">{(calendar.colors || []).map((color, index) => <span key={`${color}-${index}`} style={{ backgroundColor: color }}/>)}</div><span>More</span><span className="contribution-refresh-note">{calendar.loading ? '업데이트 중...' : 'GitHub 기여 합계'}</span></div>
+  </div>
 }
 function EventRow({ event }) {
   const type = event.type === 'PushEvent' ? '코드 커밋' : event.type === 'CreateEvent' ? '생성' : event.type === 'PullRequestEvent' ? 'Pull Request' : event.type === 'IssuesEvent' ? 'Issue' : event.type.replace('Event', '')

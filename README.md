@@ -32,14 +32,14 @@ npm run dev
 
 - Dashboard: 작업 통계, 오늘의 TODO, 프로젝트 요약, GitHub 최근 활동
 - TODO: 작업 추가, 완료 처리, 삭제, 검색, 상태 필터
-- GitHub: 공개 프로필, 공개 Repository, 최근 공개 이벤트 조회
+- GitHub: 프로필, 공개 Repository, 최근 공개 이벤트, 최근 1년 일일 기여 달력
 - Projects: 프로젝트 추가 및 삭제, 진행률 관리
 - Settings: GitHub 사용자명 설정
 
 ## 데이터 및 제한
 
 TODO, 프로젝트, GitHub 사용자명은 로그인한 계정에 연결해 Supabase 데이터베이스에 저장됩니다.
-GitHub 로그인은 Supabase Auth를 통해 처리하고 공개 프로필과 공개 저장소는 GitHub REST API에서 조회합니다. 현재 비공개 저장소는 불러오지 않습니다.
+GitHub 로그인은 Supabase Auth를 통해 처리하고 프로필·공개 저장소·최근 이벤트는 GitHub REST API, 일일 기여 달력은 GitHub GraphQL API에서 조회합니다. 기여 달력은 커밋뿐 아니라 이슈와 PR 등 GitHub 기여 수를 보여주며, 비공개 저장소 자체를 불러오지는 않습니다.
 
 ## 기술 스택
 

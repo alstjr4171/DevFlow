@@ -8,9 +8,10 @@ const config = {
   anonKey: import.meta.env.VITE_SUPABASE_ANON_KEY || '',
 }
 
-function saveSession(session) {
+function saveSession(session, fallbackSession = null) {
   const normalized = {
     ...session,
+    provider_token: session.provider_token || fallbackSession?.provider_token,
     expires_at: session.expires_at || Math.floor(Date.now() / 1000) + (session.expires_in || 3600),
   }
   localStorage.setItem(SESSION_KEY, JSON.stringify(normalized))
@@ -81,7 +82,7 @@ export async function getInitialSession() {
     localStorage.removeItem(SESSION_KEY)
     return null
   }
-  return saveSession(result)
+  return saveSession(result, session)
 }
 
 export async function signOut() {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Activity, ArrowDownRight, ArrowUpRight, Bell, BookOpen, Check,
   CheckCircle2, ChevronDown, Circle, Clock3, Code2, Command,
@@ -78,21 +78,38 @@ export default function App() {
     if (!targetUsername.trim()) return
     setGithub(g => ({ ...g, loading: true, error: '' }))
     try {
-      const headers = { Accept: 'application/vnd.github+json' }
+      const currentSession = await getInitialSession()
+      const headers = {
+        Accept: 'application/vnd.github+json',
+        ...(currentSession?.provider_token ? { Authorization: `Bearer ${currentSession.provider_token}` } : {}),
+      }
       const [u, r, e] = await Promise.all([
         fetch(`https://api.github.com/users/${targetUsername}`, { headers }),
-        fetch(`https://api.github.com/users/${targetUsername}/repos?sort=updated&per_page=6`, { headers }),
+        fetch(`https://api.github.com/users/${targetUsername}/repos?type=owner&sort=updated&per_page=100`, { headers }),
         fetch(`https://api.github.com/users/${targetUsername}/events/public?per_page=10`, { headers }),
       ])
       if (!u.ok) throw new Error(u.status === 404 ? 'GitHub 사용자를 찾을 수 없습니다.' : `GitHub API 오류 (${u.status})`)
       const user = await u.json()
-      const repos = r.ok ? await r.json() : []
-      const events = e.ok ? await e.json() : []
+      if (!r.ok) throw new Error(`Repository 목록을 불러오지 못했습니다 (${r.status}).`)
+      if (!e.ok) throw new Error(`GitHub 활동을 불러오지 못했습니다 (${e.status}).`)
+      const repos = await r.json()
+      const events = await e.json()
       setGithub({ user, repos, events, loading: false, error: '' })
     } catch (err) {
       setGithub(g => ({ ...g, loading: false, error: err.message || 'GitHub 데이터를 불러오지 못했습니다.' }))
     }
   }
+
+  const loadRepositoryCommits = useCallback(async repository => {
+    const currentSession = await getInitialSession()
+    const headers = {
+      Accept: 'application/vnd.github+json',
+      ...(currentSession?.provider_token ? { Authorization: `Bearer ${currentSession.provider_token}` } : {}),
+    }
+    const response = await fetch(`https://api.github.com/repos/${repository.full_name}/commits?per_page=10`, { headers })
+    if (!response.ok) throw new Error(`Commit 목록을 불러오지 못했습니다 (${response.status}).`)
+    return response.json()
+  }, [])
 
   async function loadContributionCalendar(targetUsername = username) {
     if (!targetUsername.trim()) return
@@ -210,7 +227,7 @@ export default function App() {
           {syncError && <div className="inline-error"><AlertCircle size={16}/>{syncError}</div>}
           {page === 'dashboard' && <Dashboard tasks={tasks} todayTasks={todayTasks} stats={stats} projects={projects} github={github} contributions={contributions} setPage={setPage} toggleTask={toggleTask}/>}
           {page === 'todo' && <TodoPage tasks={filteredTasks} allTasks={tasks} query={query} setQuery={setQuery} addTask={addTask} toggleTask={toggleTask} deleteTask={deleteTask}/>}
-          {page === 'github' && <GithubPage github={github} contributions={contributions} username={username} setUsername={setUsername} onRefresh={refreshGithubData}/>}
+          {page === 'github' && <GithubPage github={github} contributions={contributions} username={username} setUsername={setUsername} onRefresh={refreshGithubData} loadRepositoryCommits={loadRepositoryCommits}/>}
           {page === 'projects' && <ProjectsPage projects={projects} addProject={addProject} deleteProject={deleteProject}/>}
           {page === 'settings' && <SettingsPage username={username} setUsername={setUsername} loadGithub={loadGithub} session={session} onSignOut={handleSignOut}/>}
         </div>
@@ -276,7 +293,32 @@ function TodoPage({ tasks, allTasks, query, setQuery, addTask, toggleTask, delet
     <section className="panel todo-panel"><div className="todo-toolbar"><div className="filter-tabs">{['전체', '미완료', '완료'].map(f => <button key={f} className={filter === f ? 'selected' : ''} onClick={() => setFilter(f)}>{f} {f === '전체' ? allTasks.length : f === '완료' ? allTasks.filter(t => t.done).length : allTasks.filter(t => !t.done).length}</button>)}</div><div className="search-box"><Search size={16}/><input placeholder="작업 검색..." value={query} onChange={e => setQuery(e.target.value)}/></div></div><div className="task-list">{visible.length ? visible.map(t => <TaskRow key={t.id} task={t} toggleTask={toggleTask} onDelete={deleteTask}/>) : <Empty text="표시할 작업이 없습니다."/>}</div></section>
   </>
 }
-function GithubPage({ github, contributions, username, setUsername, onRefresh }) {
+function GithubPage({ github, contributions, username, setUsername, onRefresh, loadRepositoryCommits }) {
+  const [repositoryQuery, setRepositoryQuery] = useState('')
+  const [languageFilter, setLanguageFilter] = useState('전체 언어')
+  const [selectedRepository, setSelectedRepository] = useState(null)
+  const [commits, setCommits] = useState([])
+  const [commitsLoading, setCommitsLoading] = useState(false)
+  const [commitsError, setCommitsError] = useState('')
+  const languages = [...new Set(github.repos.map(repo => repo.language).filter(Boolean))].sort((a, b) => a.localeCompare(b))
+  const visibleRepositories = github.repos
+    .filter(repo => languageFilter === '전체 언어' || repo.language === languageFilter)
+    .filter(repo => `${repo.name} ${repo.description || ''}`.toLowerCase().includes(repositoryQuery.trim().toLowerCase()))
+    .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))
+
+  useEffect(() => {
+    if (!selectedRepository) return
+    let active = true
+    setCommits([])
+    setCommitsLoading(true)
+    setCommitsError('')
+    loadRepositoryCommits(selectedRepository)
+      .then(items => { if (active) setCommits(items) })
+      .catch(error => { if (active) setCommitsError(error.message || 'Commit 목록을 불러오지 못했습니다.') })
+      .finally(() => { if (active) setCommitsLoading(false) })
+    return () => { active = false }
+  }, [selectedRepository, loadRepositoryCommits])
+
   return <>
     <PageHeading eyebrow="DEVELOPER ACTIVITY" title="GitHub 활동" description="GitHub 프로필과 일일 기여도, 공개 Repository, 최근 활동을 확인합니다." action={<button className="secondary-btn" onClick={onRefresh}><RefreshCw size={16}/> 새로고침</button>}/>
     <section className="panel github-profile">
@@ -287,8 +329,25 @@ function GithubPage({ github, contributions, username, setUsername, onRefresh })
     {github.error && <div className="inline-error"><AlertCircle size={16}/>{github.error}</div>}
     {github.loading && <div className="panel"><Empty text="GitHub 데이터를 불러오는 중입니다..."/></div>}
     <section className="panel contribution-panel github-contribution-panel"><div className="panel-heading"><div><h2>일일 기여 기록</h2><p>최근 1년 · 커밋, 이슈, PR 등</p></div><strong className="contribution-total">{contributions.totalContributions} <span>contributions</span></strong></div><ContributionCalendar calendar={contributions}/></section>
+    <section className="panel repository-panel">
+      <div className="panel-heading"><div><h2>Repository</h2><p>공개 Repository {github.user?.public_repos ?? github.repos.length}개 · 최근 업데이트순</p></div><Github size={18}/></div>
+      <div className="repository-toolbar">
+        <label className="search-box"><Search size={15}/><input value={repositoryQuery} onChange={event => setRepositoryQuery(event.target.value)} placeholder="Repository 검색..."/></label>
+        <select aria-label="언어별 필터" value={languageFilter} onChange={event => setLanguageFilter(event.target.value)}><option>전체 언어</option>{languages.map(language => <option key={language}>{language}</option>)}</select>
+      </div>
+      {selectedRepository ? <div className="repository-details">
+        <button className="secondary-btn repository-back" onClick={() => setSelectedRepository(null)}>← Repository 목록</button>
+        <div className="repository-detail-heading"><div><h3>{selectedRepository.name}</h3><p>{selectedRepository.description || '설명이 등록되지 않았습니다.'}</p></div><a className="text-btn" href={selectedRepository.html_url} target="_blank" rel="noreferrer">GitHub에서 열기 <ExternalLink size={14}/></a></div>
+        <div className="repo-meta repository-detail-meta"><span>{selectedRepository.language || '언어 미지정'}</span><span><Star size={13}/> {selectedRepository.stargazers_count} Stars</span><span>⑂ {selectedRepository.forks_count} Forks</span><span>업데이트 {new Date(selectedRepository.updated_at).toLocaleDateString('ko-KR')}</span></div>
+        <h4 className="commit-list-title">최근 Commit</h4>
+        {commitsLoading ? <Empty text="Commit을 불러오는 중입니다..."/> : commitsError ? <div className="inline-error"><AlertCircle size={16}/>{commitsError}</div> : commits.length ? commits.map(commit => <a className="commit-row" href={commit.html_url} target="_blank" rel="noreferrer" key={commit.sha}><div className="event-icon"><GitCommit size={15}/></div><div className="commit-info"><b>{commit.commit.message.split('\n')[0]}</b><p>{commit.author?.login || commit.commit.author?.name || '작성자 정보 없음'} · {new Date(commit.commit.author?.date || commit.commit.committer?.date).toLocaleString('ko-KR')}</p></div><ExternalLink size={14}/></a>) : <Empty text="표시할 Commit이 없습니다."/>}
+      </div> : github.repos.length ? visibleRepositories.length ? <div className="repository-list">{visibleRepositories.map(repo => <button className="repository-card" key={repo.id} onClick={() => setSelectedRepository(repo)}>
+        <div className="repository-card-top"><b>{repo.name}</b><span className="visibility-pill">Public</span></div>
+        <p>{repo.description || '설명이 등록되지 않았습니다.'}</p>
+        <div className="repo-meta"><span><i className="language-dot"/> {repo.language || '언어 미지정'}</span><span><Star size={13}/> {repo.stargazers_count} Stars</span><span>⑂ {repo.forks_count} Forks</span><span>업데이트 {new Date(repo.updated_at).toLocaleDateString('ko-KR')}</span></div>
+      </button>)}</div> : <Empty text="검색 조건에 맞는 Repository가 없습니다."/> : !github.loading && <Empty text="공개 Repository가 없습니다."/>}
+    </section>
     <div className="two-column">
-      <section className="panel"><div className="panel-heading"><div><h2>최근 Repository</h2><p>최근 업데이트된 공개 저장소</p></div><Github size={18}/></div>{github.repos.length ? github.repos.map(repo => <div className="repo-row" key={repo.id}><div><b><a href={repo.html_url} target="_blank" rel="noreferrer">{repo.name} <ExternalLink size={12}/></a></b><p>{repo.description || '설명이 등록되지 않았습니다.'}</p><div className="repo-meta"><span><i className="language-dot"/> {repo.language || '언어 미지정'}</span><span><Star size={13}/> {repo.stargazers_count}</span><span><GitCommit size={13}/> {new Date(repo.updated_at).toLocaleDateString('ko-KR')}</span></div></div></div>) : !github.loading && <Empty text="Repository 데이터가 없습니다."/>}</section>
       <section className="panel"><div className="panel-heading"><div><h2>최근 활동</h2><p>GitHub 공개 이벤트</p></div><Activity size={18}/></div>{github.events.length ? github.events.map(ev => <EventRow key={ev.id} event={ev}/>) : !github.loading && <Empty text="최근 공개 활동이 없습니다."/>}</section>
     </div>
   </>

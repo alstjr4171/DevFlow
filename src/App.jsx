@@ -6,23 +6,9 @@ import {
   Settings, Sparkles, Star, Trash2, X, ExternalLink, GitCommit,
   RefreshCw, AlertCircle, CalendarDays, MoreHorizontal
 } from 'lucide-react'
+import { getInitialSession, hasSupabaseConfig, loadUserData, saveUserData, signInWithGitHub, signOut } from './supabase.js'
 
-const initialTasks = [
-  { id: 1, title: 'DevFlow 대시보드 UI 구성하기', category: '개발', priority: '높음', dueDate: today(), done: true },
-  { id: 2, title: 'GitHub API 연동 및 데이터 확인', category: '개발', priority: '높음', dueDate: today(), done: false },
-  { id: 3, title: 'PROJECT_COSMASH 기획 정리', category: '게임 개발', priority: '보통', dueDate: today(), done: false },
-  { id: 4, title: '알고리즘 문제 2개 풀기', category: '공부', priority: '낮음', dueDate: today(), done: false },
-]
-const initialProjects = [
-  { id: 1, name: 'DevFlow', description: '개인 개발 작업 관리 대시보드', status: '진행 중', color: '#8b7cff', progress: 35 },
-  { id: 2, name: 'PROJECT_COSMASH', description: '우주선 기반 2D 아케이드 게임', status: '기획', color: '#45c5a5', progress: 15 },
-  { id: 3, name: 'PROJECT_BASEBALL_GM', description: 'KBO 구단 운영 시뮬레이션 웹게임', status: '기획', color: '#f3ad5d', progress: 10 },
-]
 function today() { return new Date().toISOString().slice(0, 10) }
-function read(key, fallback) {
-  try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback }
-}
-function save(key, value) { localStorage.setItem(key, JSON.stringify(value)) }
 
 const navItems = [
   { id: 'dashboard', label: '대시보드', icon: LayoutDashboard, group: 'WORKSPACE' },
@@ -34,15 +20,50 @@ const navItems = [
 
 export default function App() {
   const [page, setPage] = useState('dashboard')
-  const [tasks, setTasks] = useState(() => read('devflow_tasks', initialTasks))
-  const [projects, setProjects] = useState(() => read('devflow_projects', initialProjects))
-  const [username, setUsername] = useState(() => read('devflow_github_user', 'alstjr4171'))
+  const [session, setSession] = useState(null)
+  const [authLoading, setAuthLoading] = useState(true)
+  const [authError, setAuthError] = useState('')
+  const [dataReady, setDataReady] = useState(false)
+  const [syncError, setSyncError] = useState('')
+  const [tasks, setTasks] = useState([])
+  const [projects, setProjects] = useState([])
+  const [username, setUsername] = useState('')
   const [github, setGithub] = useState({ user: null, repos: [], events: [], loading: false, error: '' })
   const [query, setQuery] = useState('')
 
-  useEffect(() => save('devflow_tasks', tasks), [tasks])
-  useEffect(() => save('devflow_projects', projects), [projects])
-  useEffect(() => save('devflow_github_user', username), [username])
+  useEffect(() => {
+    if (!hasSupabaseConfig) { setAuthLoading(false); return }
+    getInitialSession()
+      .then(setSession)
+      .catch(error => setAuthError(error.message || '로그인을 확인하지 못했습니다.'))
+      .finally(() => setAuthLoading(false))
+  }, [])
+
+  useEffect(() => {
+    if (!session?.user?.id) { setDataReady(false); return }
+    let active = true
+    setDataReady(false)
+    setSyncError('')
+    loadUserData(session.user.id).then(data => {
+      if (!active) return
+      setTasks(data?.tasks || [])
+      setProjects(data?.projects || [])
+      const githubName = data?.github_username || session.user.user_metadata?.user_name || session.user.user_metadata?.preferred_username || ''
+      setUsername(githubName)
+      setDataReady(true)
+    }).catch(error => {
+      if (active) setSyncError(error.message || '계정 데이터를 불러오지 못했습니다.')
+    })
+    return () => { active = false }
+  }, [session])
+
+  useEffect(() => {
+    if (!session?.user?.id || !dataReady) return
+    const timer = window.setTimeout(() => {
+      saveUserData(session.user.id, { tasks, projects, github_username: username }).catch(error => setSyncError(error.message || '저장하지 못했습니다.'))
+    }, 500)
+    return () => window.clearTimeout(timer)
+  }, [session, dataReady, tasks, projects, username])
 
   const completed = tasks.filter(t => t.done).length
   const todayTasks = tasks.filter(t => t.dueDate === today())
@@ -52,8 +73,8 @@ export default function App() {
     projects: projects.length
   }), [tasks, completed, projects])
 
-  async function loadGithub() {
-    if (!username.trim()) return
+  async function loadGithub(targetUsername = username) {
+    if (!targetUsername.trim()) return
     setGithub(g => ({ ...g, loading: true, error: '' }))
     try {
       const headers = { Accept: 'application/vnd.github+json' }
@@ -72,7 +93,22 @@ export default function App() {
     }
   }
 
-  useEffect(() => { loadGithub() }, [])
+  useEffect(() => { if (dataReady && username) loadGithub(username) }, [dataReady, username])
+
+  async function handleSignOut() {
+    await signOut()
+    setSession(null)
+    setTasks([])
+    setProjects([])
+    setUsername('')
+    setGithub({ user: null, repos: [], events: [], loading: false, error: '' })
+  }
+
+  if (!hasSupabaseConfig) return <LoginScreen configured={false} error={authError} />
+  if (authLoading) return <LoginScreen loading />
+  if (!session) return <LoginScreen error={authError} onSignIn={() => signInWithGitHub().catch(error => setAuthError(error.message))} />
+  if (syncError && !dataReady) return <LoginScreen error={syncError} onSignOut={handleSignOut} />
+  if (!dataReady) return <LoginScreen loading label="계정 데이터를 불러오는 중..." />
 
   function toggleTask(id) { setTasks(items => items.map(t => t.id === id ? { ...t, done: !t.done } : t)) }
   function addTask(task) { setTasks(items => [{ ...task, id: Date.now(), done: false }, ...items]) }
@@ -98,7 +134,7 @@ export default function App() {
         ))}
         <div className="sidebar-bottom">
           <div className="tip-card"><Sparkles size={17}/><b>Keep building.</b><p>작은 작업도 꾸준히 쌓이면 큰 결과가 됩니다.</p></div>
-          <div className="profile-row"><div className="profile-avatar">MS</div><div><b>Developer</b><small>개인 계정</small></div><MoreHorizontal size={18}/></div>
+          <div className="profile-row"><div className="profile-avatar">{(session.user.user_metadata?.user_name || username || 'GH').slice(0, 2).toUpperCase()}</div><div><b>{session.user.user_metadata?.full_name || username || 'GitHub 사용자'}</b><small>GitHub 계정</small></div><button className="profile-signout" onClick={handleSignOut} title="로그아웃"><MoreHorizontal size={18}/></button></div>
         </div>
       </aside>
 
@@ -108,11 +144,12 @@ export default function App() {
           <div className="top-actions"><div className="date-chip"><CalendarDays size={15}/>{new Date().toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' })}</div><button className="icon-button" title="알림"><Bell size={18}/></button></div>
         </header>
         <div className="page-content">
+          {syncError && <div className="inline-error"><AlertCircle size={16}/>{syncError}</div>}
           {page === 'dashboard' && <Dashboard tasks={tasks} todayTasks={todayTasks} stats={stats} projects={projects} github={github} setPage={setPage} toggleTask={toggleTask}/>}
           {page === 'todo' && <TodoPage tasks={filteredTasks} allTasks={tasks} query={query} setQuery={setQuery} addTask={addTask} toggleTask={toggleTask} deleteTask={deleteTask}/>}
           {page === 'github' && <GithubPage github={github} username={username} setUsername={setUsername} loadGithub={loadGithub}/>}
           {page === 'projects' && <ProjectsPage projects={projects} addProject={addProject} deleteProject={deleteProject}/>}
-          {page === 'settings' && <SettingsPage username={username} setUsername={setUsername} loadGithub={loadGithub}/>}
+          {page === 'settings' && <SettingsPage username={username} setUsername={setUsername} loadGithub={loadGithub} session={session} onSignOut={handleSignOut}/>}
         </div>
       </main>
     </div>
@@ -204,12 +241,29 @@ function ProjectsPage({ projects, addProject, deleteProject }) {
     {!projects.length && <div className="panel"><Empty text="등록된 프로젝트가 없습니다."/></div>}
   </>
 }
-function SettingsPage({ username, setUsername, loadGithub }) {
+function SettingsPage({ username, setUsername, loadGithub, session, onSignOut }) {
   const [draft, setDraft] = useState(username)
   return <>
     <PageHeading eyebrow="PREFERENCES" title="설정" description="DevFlow의 기본 설정을 관리합니다."/>
     <section className="panel settings-panel"><div className="panel-heading"><div><h2>GitHub 연결</h2><p>공개 프로필과 Repository를 불러올 계정입니다.</p></div><Github size={20}/></div><label className="field-label">GitHub 사용자명</label><div className="settings-input-row"><div className="input-prefix">@</div><input value={draft} onChange={e => setDraft(e.target.value)} placeholder="GitHub username"/><button className="primary-btn" onClick={() => { setUsername(draft.trim()); loadGithub(draft.trim()) }}>저장 및 연결</button></div><p className="helper-text">현재는 공개 데이터만 조회합니다. 비공개 Repository 접근에는 별도의 안전한 인증 구성이 필요합니다.</p></section>
-    <section className="panel settings-panel"><div className="panel-heading"><div><h2>데이터 저장</h2><p>현재 브라우저의 LocalStorage에 저장됩니다.</p></div><BookOpen size={20}/></div><div className="storage-note"><CheckCircle2 size={18}/><div><b>로컬 저장 활성화</b><p>같은 브라우저와 기기에서 다시 접속하면 TODO와 프로젝트 데이터가 유지됩니다.</p></div></div></section>
+    <section className="panel settings-panel"><div className="panel-heading"><div><h2>계정 및 데이터</h2><p>로그인한 GitHub 계정에 연결된 데이터입니다.</p></div><BookOpen size={20}/></div><div className="storage-note"><CheckCircle2 size={18}/><div><b>{session.user.user_metadata?.full_name || username || session.user.email}</b><p>TODO와 프로젝트는 Supabase에 계정별로 저장되며, 다른 기기에서 로그인해도 동기화됩니다.</p></div></div><button className="secondary-btn settings-signout" onClick={onSignOut}>GitHub 로그아웃</button></section>
   </>
+}
+function LoginScreen({ configured = true, loading = false, error = '', onSignIn, onSignOut, label = '로그인 확인 중...' }) {
+  return <main className="login-shell"><section className="login-card">
+    <div className="brand-mark login-mark"><Code2 size={22}/></div>
+    <div className="eyebrow">PERSONAL DEVELOPER WORKSPACE</div>
+    <h1>DevFlow</h1>
+    {!configured ? <>
+      <p>개인별 로그인을 시작하려면 Supabase 설정이 필요합니다.</p>
+      <div className="login-setup"><b>필요한 설정</b><span>Supabase 프로젝트와 GitHub 로그인 제공자를 만들고, GitHub Actions 변수에 프로젝트 URL과 공개 키를 등록하세요.</span><code>VITE_SUPABASE_URL</code><code>VITE_SUPABASE_ANON_KEY</code></div>
+    </> : loading ? <p>{label}</p> : <>
+      <p>GitHub 계정으로 로그인하면 나만의 TODO와 프로젝트를 관리할 수 있어요.</p>
+      {error && <div className="inline-error"><AlertCircle size={16}/>{error}</div>}
+      {onSignIn && <button className="primary-btn login-button" onClick={onSignIn}><Github size={18}/> GitHub로 로그인</button>}
+      {onSignOut && <button className="secondary-btn login-button" onClick={onSignOut}>로그아웃 후 다시 시도</button>}
+      <small>각 계정의 데이터는 분리되어 저장됩니다.</small>
+    </>}
+  </section></main>
 }
 function Empty({ text }) { return <div className="empty-state"><div><Circle size={20}/></div><p>{text}</p></div> }
